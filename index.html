@@ -1757,6 +1757,10 @@ document.getElementById('pwa-manifest').href = manifestURL;
       <label>¿Qué fecha te conviene más?</label>
       <input type="date" id="esperaFecha" />
     </div>
+    <div class="form-group">
+      <label>¿Qué horario prefieres? <span style="font-weight:400;color:var(--text-muted)">(opcional)</span></label>
+      <div id="esperaHoraGrid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:6px"></div>
+    </div>
     <div class="modal-actions">
       <button class="btn-secondary" data-closemodal="modalEspera">Cancelar</button>
       <button class="btn-primary" id="btnGuardarEspera">Registrarme →</button>
@@ -2435,20 +2439,93 @@ async function renderSlots() {
   document.getElementById('slotsTitle').textContent = `Horarios — ${titulo}`;
 
   const urgenciaEl = document.getElementById('urgenciaMsg');
-  if (urgenciaEl) {
-    if (disponibles === 0) {
-      urgenciaEl.innerHTML = '⚠️ <strong>Sin disponibilidad</strong> para este día';
+
+  if (disponibles === 0) {
+    // Día lleno — ofrecer buscar cita más cercana o lista de espera
+    if (urgenciaEl) {
+      urgenciaEl.innerHTML = '⚠️ <strong>Sin citas disponibles</strong> para este día';
       urgenciaEl.style.color = 'var(--rose)';
-    } else {
+      urgenciaEl.style.display = 'block';
+    }
+    mostrarOpcionesDiaLleno();
+  } else {
+    if (urgenciaEl) {
       urgenciaEl.innerHTML = `🔴 <strong>Último espacio disponible</strong> para este día`;
       urgenciaEl.style.color = 'var(--rose)';
+      urgenciaEl.style.display = 'block';
     }
-    urgenciaEl.style.display = 'block';
+    // Ocultar panel de día lleno si estaba visible
+    const panel = document.getElementById('diaLlenoPanel');
+    if (panel) panel.style.display = 'none';
   }
 
   document.getElementById('btnStep3').disabled = (disponibles === 0);
   checkEsperaBanner();
 }
+
+// Muestra opciones cuando el día está completamente lleno
+function mostrarOpcionesDiaLleno() {
+  let panel = document.getElementById('diaLlenoPanel');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = 'diaLlenoPanel';
+    panel.style.cssText = 'margin-top:12px;display:flex;flex-direction:column;gap:10px';
+    const grid = document.getElementById('slotsGrid');
+    grid.parentNode.insertBefore(panel, grid.nextSibling);
+  }
+  panel.style.display = 'flex';
+  panel.innerHTML = `
+    <button onclick="buscarCitaMasCercana()"
+      style="display:flex;align-items:center;gap:12px;padding:14px;border:2px solid #1A6B8A;border-radius:12px;background:linear-gradient(135deg,#E8F6FC,#D6F0F8);cursor:pointer;font-family:inherit;text-align:left;width:100%">
+      <span style="font-size:22px">📅</span>
+      <div style="flex:1">
+        <div style="font-size:14px;font-weight:700;color:#1A6B8A">Buscar cita más cercana</div>
+        <div style="font-size:12px;color:#2196C4;margin-top:2px">Te llevamos al próximo día con espacio</div>
+      </div>
+      <span style="color:#1A6B8A;font-size:18px">›</span>
+    </button>
+    <button onclick="irAListaEspera()"
+      style="display:flex;align-items:center;gap:12px;padding:14px;border:2px solid #F5A623;border-radius:12px;background:#FFF8EE;cursor:pointer;font-family:inherit;text-align:left;width:100%">
+      <span style="font-size:22px">📝</span>
+      <div style="flex:1">
+        <div style="font-size:14px;font-weight:700;color:#B26A00">Lista de espera para este día</div>
+        <div style="font-size:12px;color:#D48A1E;margin-top:2px">Te avisamos si se libera un espacio</div>
+      </div>
+      <span style="color:#B26A00;font-size:18px">›</span>
+    </button>
+  `;
+}
+
+// Busca la próxima fecha con disponibilidad y navega a ella
+async function buscarCitaMasCercana() {
+  const btn = document.querySelector('#diaLlenoPanel button');
+  if (btn) btn.style.opacity = '0.6';
+  const fecha = await findFirstAvailableDate();
+  if (fecha) {
+    const [Y,M,D] = fecha.split('-').map(Number);
+    S.selectedDate = new Date(Y, M-1, D);
+    renderCalendar();
+    await renderSlots();
+    // Hacer scroll a los horarios
+    const sec = document.getElementById('slotsSection');
+    if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } else {
+    alert('No hay citas disponibles en los próximos 30 días. Te sugerimos unirte a la lista de espera.');
+    irAListaEspera();
+  }
+}
+
+// Abre el formulario de lista de espera con la fecha seleccionada
+function irAListaEspera() {
+  const banner = document.getElementById('esperaBannerCTA');
+  if (banner) {
+    banner.style.display = 'block';
+    banner.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+}
+window.mostrarOpcionesDiaLleno = mostrarOpcionesDiaLleno;
+window.buscarCitaMasCercana = buscarCitaMasCercana;
+window.irAListaEspera = irAListaEspera;
 
 function dateToStr(d) {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
@@ -3246,22 +3323,108 @@ window.loadEspera = async (filtro = 'todas') => {
   }
 };
 
+// Poblar el selector de horario preferido en lista de espera
+let _esperaHoraSel = null;
+function poblarEsperaHoras() {
+  const grid = document.getElementById('esperaHoraGrid');
+  if (!grid) return;
+  _esperaHoraSel = null;
+  const mid = getMedicoId();
+
+  // Psicología (o cualquier servicio sin horarios fijos) → franjas simples
+  const esFranjaSimple = (S.especialidad === 'psicologia' || mid === 'pamela' || !MEDICOS_ABIERTOS.includes(mid));
+
+  grid.innerHTML = '';
+  let opts;
+  if (esFranjaSimple) {
+    opts = [
+      { v: 'Mañana', label: '🌅 Mañana' },
+      { v: 'Tarde', label: '☀️ Tarde' },
+      { v: 'Cualquier hora', label: 'Cualquiera' }
+    ];
+  } else {
+    let dow = 3;
+    const fechaInput = document.getElementById('esperaFecha').value;
+    if (fechaInput) { const d = new Date(fechaInput + 'T12:00:00'); dow = d.getDay(); }
+    let horas = [];
+    try {
+      const h = HORARIOS[mid];
+      if (h && h.slots) horas = h.slots(dow) || [];
+    } catch(e) {}
+    if (horas.length === 0) {
+      try { horas = HORARIOS[mid].slots(3) || []; } catch(e) {}
+    }
+    opts = [{v:'Cualquier hora', label:'Cualquiera'}].concat(horas.map(hh => ({v:hh, label:formatTime(hh)})));
+  }
+
+  opts.forEach(o => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = o.label;
+    btn.style.cssText = 'padding:9px 4px;border:2px solid var(--border);border-radius:9px;background:var(--cream);color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .15s';
+    btn.addEventListener('click', () => {
+      grid.querySelectorAll('button').forEach(b => {
+        b.style.borderColor = 'var(--border)'; b.style.background = 'var(--cream)'; b.style.color = 'var(--navy)';
+      });
+      btn.style.borderColor = 'var(--celeste-dark)';
+      btn.style.background = 'linear-gradient(135deg,#1A6B8A,#2196C4)';
+      btn.style.color = '#fff';
+      _esperaHoraSel = o.v;
+    });
+    grid.appendChild(btn);
+  });
+}
+window.poblarEsperaHoras = poblarEsperaHoras;
+
 window.guardarEspera = async () => {
   const nombre = document.getElementById('esperaNombre').value.trim();
   const tel = document.getElementById('esperaTel').value.trim();
   const fecha = document.getElementById('esperaFecha').value;
+  const horaPref = _esperaHoraSel;
   if (!nombre || !tel) { alert('Por favor ingresa tu nombre y teléfono'); return; }
+
+  let fechaTexto = 'Sin preferencia';
+  if (fecha) {
+    const d = new Date(fecha + 'T12:00:00');
+    fechaTexto = d.toLocaleDateString('es-GT', { day:'numeric', month:'long', year:'numeric' });
+  }
+  const horasFranja = ['Mañana','Tarde','Cualquier hora'];
+  const horaTexto = horaPref ? (horasFranja.includes(horaPref) ? horaPref : formatTime(horaPref)) : 'Sin preferencia';
+
   try {
     await addDoc(window._espCol, {
       nombre, tel,
       especialidad: S.especialidad,
       fechaPreferida: fecha || null,
+      horaPreferida: horaPref || null,
+      clinica: 'sancristobal',
       registradoEn: new Date().toISOString()
     });
+
+    // ── Notificación WhatsApp via Make.com (webhook lista de espera) ──
+    try {
+      await fetch('https://hook.us2.make.com/cqlo0kh1wagdt9pwbxan9ww233bme6nw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tipo_evento: 'lista_espera',
+          clinica: 'San Cristóbal',
+          paciente: nombre,
+          telefono: tel,
+          especialidad: NOMBRES_ESP[S.especialidad] || S.especialidad,
+          fecha_preferida: fechaTexto,
+          hora_preferida: horaTexto,
+          notificar: ['50236580859']
+        })
+      });
+      console.log('✅ Webhook lista de espera enviado');
+    } catch(e) { console.log('⚠️ Error webhook lista espera:', e); }
+
     closeModal('modalEspera');
     document.getElementById('esperaNombre').value = '';
     document.getElementById('esperaTel').value = '';
     document.getElementById('esperaFecha').value = '';
+    _esperaHoraSel = null;
     // Show thank you in step3
     document.getElementById('esperaBannerCTA').innerHTML = `
       <div class="espera-icon">✅</div>
@@ -3797,6 +3960,7 @@ function initAllListeners() {
   const beff = document.getElementById('btnEsperaFromFuturo');
   if (beff) beff.addEventListener('click', () => {
     closeModal('modalFuturo');
+    poblarEsperaHoras();
     openModal('modalEspera');
   });
 
@@ -3806,6 +3970,7 @@ function initAllListeners() {
     document.getElementById('esperaEspLabel').textContent = NOMBRES_ESP[S.especialidad] || S.especialidad;
     // Pre-fill fecha if selected
     if (S.selectedDate) document.getElementById('esperaFecha').value = dateToStr(S.selectedDate);
+    poblarEsperaHoras();
     openModal('modalEspera');
   });
 
