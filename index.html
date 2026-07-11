@@ -2106,10 +2106,10 @@ function getMedicoId() {
   return MEDICOS[S.especialidad]?.id;
 }
 
-// Devuelve los números a notificar: especialista + sede.
+// Números a notificar para CITAS agendadas: especialista + sede.
 // mid: 'denis' (medicina interna/diabetes), 'nochez' (pediatría), 'pamela' (psicología)
 // sede: 'mixco' o 'sancristobal'
-function getNotificarNums(mid, sede) {
+function getNotificarCitas(mid, sede) {
   const especialista = {
     denis:  '50242146520',  // Medicina interna y diabetes (CEDIMI)
     nochez: '50258436629',  // Pediatría (NeoPediatrics)
@@ -2123,6 +2123,15 @@ function getNotificarNums(mid, sede) {
   if (especialista[mid]) nums.push(especialista[mid]);
   if (sedes[sede]) nums.push(sedes[sede]);
   return nums;
+}
+
+// Números a notificar para LISTA DE ESPERA: solo recepción de la sede (no especialista).
+function getNotificarEspera(sede) {
+  const sedes = {
+    mixco:        '50255370427',
+    sancristobal: '50236580859'
+  };
+  return sedes[sede] ? [sedes[sede]] : [];
 }
 
 function isAvailableDay(year, month, day) {
@@ -2638,6 +2647,7 @@ window.confirmarCita = async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         id,
+        tipo_evento: 'cita_agendada',
         clinica: 'San Cristóbal',
         paciente: nombre,
         padre: cita.padre || '',
@@ -2649,7 +2659,7 @@ window.confirmarCita = async () => {
         precio: `Q${S.precio}`,
         tipo: cita.tipo,
         medico: medico.nombre,
-        notificar: getNotificarNums(getMedicoId(), 'sancristobal')
+        notificar: getNotificarCitas(getMedicoId(), 'sancristobal')
       })
     });
     console.log('✅ Webhook enviado a Make.com');
@@ -3423,7 +3433,7 @@ window.guardarEspera = async () => {
 
     // ── Notificación WhatsApp via Make.com (webhook lista de espera) ──
     try {
-      await fetch('https://hook.us2.make.com/cqlo0kh1wagdt9pwbxan9ww233bme6nw', {
+      await fetch('https://hook.us2.make.com/ikbjgcxbi0ixaef3pyh2e1mx47rfkpcc', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -3434,7 +3444,7 @@ window.guardarEspera = async () => {
           especialidad: NOMBRES_ESP[S.especialidad] || S.especialidad,
           fecha_preferida: fechaTexto,
           hora_preferida: horaTexto,
-          notificar: getNotificarNums(getMedicoId(), 'sancristobal')
+          notificar: getNotificarEspera('sancristobal')
         })
       });
       console.log('✅ Webhook lista de espera enviado');
