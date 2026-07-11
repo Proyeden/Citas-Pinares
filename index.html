@@ -1820,16 +1820,17 @@ const HORARIOS = {
   },
   // NeoPediatrics (Dra. María José Nóchez): 16:00, 16:45, 17:30
   nochez: {
-    diasSemana: [1,2,3,4,5],
+    diasSemana: [1,2,3,4,5,6],
     slots: (dow) => {
       if (dow >= 1 && dow <= 5) return ['16:00','16:45','17:30'];
+      if (dow === 6) return ['09:00','09:45','10:30','11:15','12:00','12:45'];
       return [];
     },
     slotsLibres: 1
   },
   // Psicología: siempre lista de espera (no genera slots)
   pamela: {
-    diasSemana: [1,2,3,4,5],
+    diasSemana: [1,2,3,4,5,6],
     slots: () => [],
     slotsLibres: 0
   }
@@ -1838,11 +1839,13 @@ const HORARIOS = {
 // ── CONFIGURACIÓN DE REVELADO POR SERVICIO ────────────────────────────────
 // Define en qué orden se revelan los espacios (uno a la vez).
 const REVEAL = {
-  // NeoPediatrics: un espacio a la vez en orden normal
+  // NeoPediatrics: un espacio a la vez en orden normal.
+  // Los horarios dependen del día (sábado es distinto), así que grupos es una función de dow.
   nochez: {
-    grupos: [
-      { slots: ['16:00','16:45','17:30'], orden: 'normal' }
-    ]
+    gruposPorDia: (dow) => {
+      if (dow === 6) return [ { slots: ['09:00','09:45','10:30','11:15','12:00','12:45'], orden: 'normal' } ];
+      return [ { slots: ['16:00','16:45','17:30'], orden: 'normal' } ];
+    }
   },
   // CEDIMI: mañana un espacio a la vez en orden INVERSO (11:15 primero),
   // la tarde (17:30) se habilita al llenarse la mañana o al pasar el mediodía.
@@ -1855,25 +1858,29 @@ const REVEAL = {
 };
 
 // Calcula qué espacios mostrar y cuál es el disponible (clickeable)
-// para un servicio dado, según ocupación y hora actual.
-function calcularReveal(mid, occupied, esHoy, nowMins) {
+// para un servicio dado, según ocupación, hora actual y día de la semana.
+function calcularReveal(mid, occupied, esHoy, nowMins, dow) {
   const cfg = REVEAL[mid];
   if (!cfg) return { display: [], available: new Set() };
+
+  // Los grupos pueden ser fijos (cfg.grupos) o depender del día (cfg.gruposPorDia)
+  const grupos = cfg.gruposPorDia ? cfg.gruposPorDia(dow) : cfg.grupos;
+  if (!grupos || grupos.length === 0) return { display: [], available: new Set() };
 
   const display = [];
   const available = new Set();
   const pasado = (slot) => esHoy && nowMins >= timeToMins(slot) + 15;
 
   // Recolectar todos los slots para mostrar (en orden cronológico)
-  cfg.grupos.forEach(g => g.slots.forEach(s => display.push(s)));
+  grupos.forEach(g => g.slots.forEach(s => display.push(s)));
   display.sort();
 
   // Estado de la mañana (para CEDIMI)
-  const grpManana = cfg.grupos.find(g => g.tipo === 'manana');
+  const grpManana = grupos.find(g => g.tipo === 'manana');
   const mananaLlena = grpManana ? grpManana.slots.every(s => occupied.has(s)) : false;
   const pasoMediodia = esHoy && nowMins >= 12 * 60;
 
-  cfg.grupos.forEach(g => {
+  grupos.forEach(g => {
     // ¿Este grupo está desbloqueado?
     if (g.desbloqueo === 'mananaLlenaOMediodia') {
       if (!(mananaLlena || pasoMediodia)) return; // aún bloqueado
@@ -2438,7 +2445,7 @@ async function renderSlots() {
   const nowMins = now.getHours() * 60 + now.getMinutes();
 
   // Calcular revelado (uno a la vez, orden inverso CEDIMI mañana, etc.)
-  const { display, available } = calcularReveal(mid, occupied, esHoy, nowMins);
+  const { display, available } = calcularReveal(mid, occupied, esHoy, nowMins, dow);
 
   // Render — mostramos los slots del revelado; solo el disponible es clickeable
   grid.innerHTML = '';
