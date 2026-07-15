@@ -1821,7 +1821,7 @@ document.getElementById('pwa-manifest').href = manifestURL;
 <!-- FIREBASE -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getFirestore, collection, addDoc, getDocs, doc, setDoc, updateDoc, deleteDoc, query, where, orderBy, Timestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getFirestore, collection, addDoc, getDocs, getDoc, doc, setDoc, updateDoc, deleteDoc, query, where, orderBy, Timestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyCHYg68CN9m5hpBVvyL8QcOOuX7L7BZOdA",
@@ -3780,11 +3780,19 @@ window.cerrarFlyer = cerrarFlyer;
 
 async function cargarFlyer(){
   try {
-    const snap = await getDocs(window._cfgCol);
+    // Consultar SOLO el documento del flyer (más rápido que traer toda la
+    // colección config_app).
     let cfg = null;
-    snap.forEach(d => { if (d.id === 'flyer_sancristobal') cfg = d.data(); });
+    try {
+      const dref = doc(window._db, 'config_app', 'flyer_sancristobal');
+      const dsnap = await getDoc(dref);
+      if (dsnap.exists()) cfg = dsnap.data();
+    } catch(_) {
+      // Respaldo: si getDoc no está disponible, usar la colección.
+      const snap = await getDocs(window._cfgCol);
+      snap.forEach(d => { if (d.id === 'flyer_sancristobal') cfg = d.data(); });
+    }
     if (!cfg || !cfg.activo || !cfg.imagen) return;
-    // Vencimiento: si tiene fecha de fin y ya pasó, no se muestra.
     if (cfg.hasta) {
       const hoy = new Date(); hoy.setHours(0,0,0,0);
       const fin = new Date(cfg.hasta + 'T23:59:59');
@@ -3793,8 +3801,11 @@ async function cargarFlyer(){
     const img = document.getElementById('flyerImg');
     const ov = document.getElementById('flyerOverlay');
     if (img && ov) {
-      img.src = cfg.imagen;
+      // Mostrar el overlay YA (fondo oscuro) y dejar que la imagen cargue
+      // dentro. Así el paciente ve el anuncio apenas abre, sin esperar a que
+      // la imagen termine de descargar y sin que "aparezca tarde".
       ov.style.display = 'flex';
+      img.src = cfg.imagen;
     }
   } catch(e) { console.log('Flyer:', e); }
 }
