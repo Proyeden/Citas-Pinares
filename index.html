@@ -2315,7 +2315,11 @@ function isDayBookable(year, month, day) {
   // Today: available only if NOT full. If full, treat as 'future' so
   // the calendar highlights the first real available day instead.
   if (target.getTime() === today.getTime()) {
-    return window._todayIsFull ? 'future' : 'available';
+    // HOY LLENO no es "programación no disponible": la programación existe, lo
+    // que ya no hay son citas. Devolvemos 'available' para que al tocarlo se
+    // muestre "Agenda completa" con las dos opciones (ver el próximo día con
+    // espacio / lista de espera), igual que cualquier otro día sin cupo.
+    return 'available';
   }
 
   // If this day is the first available date found → open it
