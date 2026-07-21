@@ -2234,13 +2234,15 @@ async function cargarSlotsSC(mid) {
   if (window._slotsSCCache && window._slotsSCCache.mid === mid) return window._slotsSCCache.map;
   const map = new Map();
   try {
-    const q = query(window._slotsSCCol,
-      where('medicoId','==',mid),
-      where('disponible','==',true));
+    // UN SOLO filtro: combinar dos campos exige un índice compuesto en
+    // Firestore y, si no existe, la consulta FALLA EN SILENCIO y la app cree
+    // que no hay horarios. El resto se filtra en memoria.
+    const q = query(window._slotsSCCol, where('medicoId','==',mid));
     const snap = await getDocs(q);
     snap.forEach(d => {
       const x = d.data();
       if (!x.fecha || !x.hora) return;
+      if (x.disponible === false) return;
       // La colección es compartida con Mixco: tomamos SOLO los de esta sede.
       if (x.clinica !== 'sancristobal') return;
       if (!map.has(x.fecha)) map.set(x.fecha, []);
@@ -2268,12 +2270,15 @@ async function proximaFechaConEspacio(mid, desdeFecha) {
     // Quitar los que ya están tomados
     const ocupados = new Set();
     try {
-      const q = query(window._col,
-        where('fecha','==',f),
-        where('medicoId','==',mid),
-        where('clinica','==','sancristobal'));
+      const q = query(window._col, where('medicoId','==',mid));
       const snap = await getDocs(q);
-      snap.forEach(d => { if (d.data().estado !== 'cancelada') ocupados.add(d.data().hora); });
+      snap.forEach(d => {
+        const c = d.data();
+        if (c.fecha !== f) return;
+        if (c.clinica !== 'sancristobal') return;
+        if (c.estado === 'cancelada') return;
+        ocupados.add(c.hora);
+      });
     } catch(e) {}
     if (slots.some(s => !ocupados.has(s))) return f;
   }
@@ -2298,12 +2303,15 @@ async function isDayFull(dateStr, mid) {
 
   const occupied = new Set();
   try {
-    const q = query(window._col,
-      where('fecha','==',dateStr),
-      where('medicoId','==',mid),
-      where('clinica','==','sancristobal'));
+    const q = query(window._col, where('medicoId','==',mid));
     const snap = await getDocs(q);
-    snap.forEach(doc => { if (doc.data().estado !== 'cancelada') occupied.add(doc.data().hora); });
+    snap.forEach(doc => {
+      const c = doc.data();
+      if (c.fecha !== dateStr) return;
+      if (c.clinica !== 'sancristobal') return;
+      if (c.estado === 'cancelada') return;
+      occupied.add(c.hora);
+    });
   } catch(e) {}
 
   // Día lleno si todos los slots están ocupados
@@ -2616,13 +2624,15 @@ async function renderSlots() {
   // Leer citas ya reservadas de este servicio (mismo médico + clínica San Cristóbal)
   const occupied = new Set();
   try {
-    const q = query(window._col,
-      where('fecha','==',dateStr),
-      where('medicoId','==',mid),
-      where('clinica','==','sancristobal'));
+    // Un solo filtro para no depender de un índice compuesto de Firestore.
+    const q = query(window._col, where('medicoId','==',mid));
     const snap = await getDocs(q);
     snap.forEach(d => {
-      if (d.data().estado !== 'cancelada') occupied.add(d.data().hora);
+      const c = d.data();
+      if (c.fecha !== dateStr) return;
+      if (c.clinica !== 'sancristobal') return;
+      if (c.estado === 'cancelada') return;
+      occupied.add(c.hora);
     });
   } catch(e) { console.log('Firebase error citas:', e); }
 
