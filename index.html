@@ -2133,8 +2133,14 @@ window.selectSpecialty = (esp, el) => {
   document.getElementById('step3Title').textContent = NOMBRES_ESP[esp];
   // price determined internally, shown only at confirmation
 
-  // Find first available date (today or next open day)
-  findFirstAvailableDate().then(() => renderCalendar());
+  // Find first available date (today or next open day). Precargamos la caché
+  // del médico ANTES de renderizar el calendario, para que isDayBookable tenga
+  // los datos y no muestre "Programación no disponible" por una carrera.
+  (async () => {
+    try { await cargarSlotsSC(getMedicoId()); } catch(_){}
+    await findFirstAvailableDate();
+    renderCalendar();
+  })();
   setTimeout(()=>goStep(2), 200); // goes to primera visita step
 };
 
@@ -2261,13 +2267,14 @@ function invalidarSlotsSC() { window._slotsSCCache = null; }
 async function proximaFechaConEspacio(mid, desdeFecha) {
   const mapa = await cargarSlotsSC(mid);
   const hoy = dateToStr(new Date());
+  const now = new Date();
+  const nowMin = now.getHours()*60 + now.getMinutes();
   const fechas = [...mapa.keys()]
     .filter(f => f > desdeFecha && f >= hoy)
     .sort();
   for (const f of fechas) {
     const slots = mapa.get(f) || [];
     if (!slots.length) continue;
-    // Quitar los que ya están tomados
     const ocupados = new Set();
     try {
       const q = query(window._col, where('medicoId','==',mid));
@@ -2280,7 +2287,17 @@ async function proximaFechaConEspacio(mid, desdeFecha) {
         ocupados.add(c.hora);
       });
     } catch(e) {}
-    if (slots.some(s => !ocupados.has(s))) return f;
+    // Si f es hoy, descartar los slots ya pasados de hora.
+    const esHoy = f === hoy;
+    const libre = slots.some(s => {
+      if (ocupados.has(s)) return false;
+      if (esHoy) {
+        const [h,m] = s.split(':').map(Number);
+        if (nowMin >= h*60 + m + 15) return false;
+      }
+      return true;
+    });
+    if (libre) return f;
   }
   return null;
 }
@@ -2314,8 +2331,22 @@ async function isDayFull(dateStr, mid) {
     });
   } catch(e) {}
 
-  // Día lleno si todos los slots están ocupados
-  if (!allSlots.every(s => occupied.has(s))) return recordar(false);
+  // Si el día es HOY, un slot ya pasado de hora NO cuenta como disponible
+  // (mismo criterio que Mixco). Sin esto, un hueco de la mañana ya vencido
+  // hacía ver el día como libre y luego no había nada real que mostrar.
+  const now = new Date();
+  const esHoy = dateStr === dateToStr(now);
+  const nowMin = esHoy ? (now.getHours()*60 + now.getMinutes()) : -1;
+  const disponible = s => {
+    if (occupied.has(s)) return false;
+    if (esHoy) {
+      const [h,m] = s.split(':').map(Number);
+      if (nowMin >= h*60 + m + 15) return false; // 15 min de gracia
+    }
+    return true;
+  };
+  // Día lleno si NINGÚN slot está disponible
+  if (allSlots.some(disponible)) return recordar(false);
   return recordar('real');
 }
 
@@ -2399,12 +2430,21 @@ function isDayBookable(year, month, day) {
   if (window._diaSinEspacio && window._diaSinEspacio[targetStr]) return 'available';
 
   const cache = window._slotsSCCache;
+  const diasAdelante = Math.round((target - today) / 86400000);
   if (cache && cache.mid === mid) {
-    const diasAdelante = Math.round((target - today) / 86400000);
-    if (diasAdelante <= 30 && !(cache.map.get(targetStr) || []).length) return 'available';
+    // Caché lista: si hay slots publicados ese día → agendable. Si no hay,
+    // dentro de 30 días es un día lleno/bloqueado (programación existe) →
+    // clickeable para mostrar opciones; más allá, aún no aperturado.
+    const tieneSlots = (cache.map.get(targetStr) || []).length > 0;
+    if (tieneSlots) return 'available';
+    if (diasAdelante >= 0 && diasAdelante <= 30) return 'available';
+    return 'future';
   }
-
-  // Días aún no aperturados → programación pendiente / lista de espera
+  // Caché del médico aún no cargó (carrera al entrar recién a la especialidad).
+  // No afirmamos "no disponible": dejamos el día agendable dentro del horizonte
+  // y, al cargar la caché, un re-render lo corrige. renderSlots dirá la verdad
+  // al tocar el día.
+  if (diasAdelante >= 0 && diasAdelante <= 30) return 'available';
   return 'future';
 }
 
