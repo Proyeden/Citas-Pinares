@@ -1463,9 +1463,14 @@ document.getElementById('pwa-manifest').href = manifestURL;
     <div class="pin-container">
       <div style="text-align:center; font-size:48px; margin-bottom:20px">🔐</div>
       <h2>Acceso Personal</h2>
-      <p>Ingresa el PIN para continuar</p>
-      <div class="pin-input" id="pinInputs"></div>
-      <div class="pin-error" id="pinError">PIN incorrecto. Intenta de nuevo.</div>
+      <p>Ingresá tu correo y contraseña de la clínica</p>
+      <input type="email" id="loginEmail" autocomplete="username"
+             placeholder="correo@clinica.com"
+             style="width:100%;padding:13px;margin-bottom:10px;border:1.5px solid #CBD5E1;border-radius:11px;font-family:inherit;font-size:15px;box-sizing:border-box">
+      <input type="password" id="loginPass" autocomplete="current-password"
+             placeholder="Contraseña"
+             style="width:100%;padding:13px;margin-bottom:10px;border:1.5px solid #CBD5E1;border-radius:11px;font-family:inherit;font-size:15px;box-sizing:border-box">
+      <div class="pin-error" id="pinError">Correo o contraseña incorrectos.</div>
       <button class="btn-primary" id="btnCheckPin">Entrar</button>
       <div style="text-align:center; margin-top:12px">
         <button class="btn-secondary" id="btnCancelarLoginView" style="width:auto; padding: 8px 20px;">Cancelar</button>
@@ -1822,6 +1827,7 @@ document.getElementById('pwa-manifest').href = manifestURL;
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import { getFirestore, collection, addDoc, getDocs, getDoc, doc, setDoc, updateDoc, deleteDoc, query, where, orderBy, Timestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getAuth, signInAnonymously, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyCHYg68CN9m5hpBVvyL8QcOOuX7L7BZOdA",
@@ -1843,6 +1849,120 @@ window._slotsCol = collection(db, 'slots_disponibles'); // publicados por la age
 window._slotsSCCol = collection(db, 'slots_disponibles'); // misma colección que Mixco; se distingue por el campo 'clinica'
 window._cfgCol = collection(db, 'config_app'); // config de la app (flyer, etc.)
 window._fbReady = true;
+
+// ═══ IDENTIDAD ═══════════════════════════════════════════════════════════
+// El paciente NO se registra ni ve ninguna pantalla de acceso. Al cargar la
+// página, el navegador le pide a Firebase una identidad temporal y anónima.
+// Es lo que permite que las reglas de seguridad distingan "alguien que está
+// usando la página" de "alguien pidiéndole datos a la base desde afuera".
+// El link sigue siendo público: se abre y se agenda igual que siempre.
+const auth = getAuth(app);
+window._auth = auth;
+
+// Promesa que se resuelve cuando ya hay identidad. Toda lectura o escritura
+// espera a que esto termine; si no, Firestore rechazaría por falta de permiso.
+window._listo = (async () => {
+  try {
+    if (!auth.currentUser) await signInAnonymously(auth);
+    return true;
+  } catch (e) {
+    console.warn('No se pudo iniciar sesión anónima:', e && e.code);
+    return false;
+  }
+})();
+
+// ¿La sesión actual es del personal (correo y contraseña) o de un paciente?
+window._esPersonal = () => {
+  const u = auth.currentUser;
+  if (!u) return false;
+  return u.providerData.some(p => p.providerId === 'password');
+};
+
+// ═══ SEPARACIÓN DE DATOS ═════════════════════════════════════════════════
+// `citas` guarda CUÁNDO (fecha, hora, médico) — es lo único que el paciente
+// necesita leer para ver qué está libre. `citas_datos` guarda QUIÉN (nombre,
+// teléfono, correo, nacimiento, responsable): se puede crear pero no leer.
+window._datosCol  = collection(db, 'citas_datos');
+window._espDatCol = collection(db, 'espera_datos');
+
+// Campos personales que NUNCA van en la colección pública.
+const CAMPOS_PERSONALES = ['nombre','tel','correo','fechaNac','padre'];
+
+// Parte un registro en su mitad pública y su mitad privada.
+window._separarDatos = (registro) => {
+  const publico = {}, privado = {};
+  for (const [k, v] of Object.entries(registro)) {
+    if (CAMPOS_PERSONALES.includes(k)) privado[k] = v; else publico[k] = v;
+  }
+  return { publico, privado };
+};
+
+// ── Huella de búsqueda ───────────────────────────────────────────────────
+// Para detectar "usted ya tiene una cita ese día" hacía falta comparar
+// teléfono y nombre contra los de todos los demás. Ahora se compara una
+// huella irreversible: quien ya sabe el teléfono y el nombre puede
+// reconocer su propia cita; quien no, no puede sacar nada de la huella.
+const _normTelH = (t) => (t || '').replace(/\D/g, '');
+const _normNomH = (n) => (n || '').toLowerCase().trim().replace(/\s+/g, ' ')
+  .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+window._huella = async (tel, nombre) => {
+  const base = _normTelH(tel) + '|' + _normNomH(nombre);
+  try {
+    const buf = new TextEncoder().encode(base);
+    const dig = await crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(dig))
+      .map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
+  } catch (e) {
+    // crypto.subtle no existe fuera de HTTPS (por ejemplo al abrir el archivo
+    // con doble clic). Reserva simple para que la página no se rompa.
+    let h = 0;
+    for (let i = 0; i < base.length; i++) h = ((h << 5) - h + base.charCodeAt(i)) | 0;
+    return 'x' + (h >>> 0).toString(36);
+  }
+};
+
+// ── Guardar una cita: mitad pública + mitad privada, mismo identificador ──
+window._guardarCita = async (cita) => {
+  await window._listo;
+  const { publico, privado } = window._separarDatos(cita);
+  publico.busqueda = await window._huella(cita.tel, cita.nombre);
+  const ref = await addDoc(window._col, publico);
+  try {
+    await setDoc(doc(window._db, 'citas_datos', ref.id), { ...privado, citaId: ref.id });
+  } catch (e) {
+    console.warn('citas_datos:', e && e.code);
+  }
+  return ref;
+};
+
+// ── Recuperar los datos personales de una lista de citas (solo personal) ──
+// Devuelve un mapa docId → {nombre, tel, ...}. Si no hay permiso, vacío.
+// ── Lista de espera: misma separación que las citas ──────────────────────
+window._guardarEspera = async (registro) => {
+  await window._listo;
+  const { publico, privado } = window._separarDatos(registro);
+  const ref = await addDoc(window._espCol, publico);
+  try {
+    await setDoc(doc(window._db, 'espera_datos', ref.id), { ...privado, esperaId: ref.id });
+  } catch (e) {
+    console.warn('espera_datos:', e && e.code);
+  }
+  return ref;
+};
+
+window._traerDatos = async (docIds) => {
+  const mapa = {};
+  if (!window._esPersonal()) return mapa;
+  await Promise.all(docIds.map(async id => {
+    try {
+      const s = await getDoc(doc(window._db, 'citas_datos', id));
+      if (s.exists()) mapa[id] = s.data();
+    } catch (_) {}
+  }));
+  return mapa;
+};
+
 
 // ── DATA ──────────────────────────────────────────────
 const MEDICOS = {
@@ -2013,79 +2133,58 @@ window.showView = (id) => {
   document.getElementById(id).classList.add('active');
 };
 
-window.showPersonalLogin = () => {
-  buildPinInputs();
-  showView('personalLoginView');
-};
-
-function buildPinInputs() {
-  const c = document.getElementById('pinInputs');
-  c.innerHTML = '';
-  for (let i=0; i<6; i++) {
-    const inp = document.createElement('input');
-    inp.type = 'password';
-    inp.maxLength = 1;
-    inp.className = 'pin-digit';
-    inp.id = `pd${i}`;
-    inp.addEventListener('input', e => {
-      const next = document.getElementById(`pd${i+1}`);
-      if (e.target.value && next) next.focus();
-    });
-    inp.addEventListener('keydown', e => {
-      if (e.key==='Backspace' && !e.target.value) {
-        const prev = document.getElementById(`pd${i-1}`);
-        if (prev) { prev.value=''; prev.focus(); }
-      }
-    });
-    c.appendChild(inp);
+// El PIN se comparaba aquí mismo, en JavaScript que cualquiera puede leer
+// abriendo el código fuente de la página: no protegía nada. Ahora el acceso
+// lo valida Firebase, y es esa sesión la que habilita ver datos de pacientes.
+window.checkPin = async () => {
+  const err   = document.getElementById('pinError');
+  const btn   = document.getElementById('btnCheckPin');
+  const email = (document.getElementById('loginEmail').value || '').trim();
+  const pass  = document.getElementById('loginPass').value || '';
+  if (!email || !pass) {
+    err.textContent = 'Ingresá correo y contraseña.';
+    err.style.display = 'block';
+    return;
   }
-}
-
-window.checkPin = () => {
-  let pin = '';
-  for (let i=0;i<6;i++) {
-    const el = document.getElementById(`pd${i}`);
-    if (el) pin += el.value;
-  }
-  if (pin === '260723') {
-    document.getElementById('pinError').style.display = 'none';
-    // Save session so assistant doesn't need to re-enter PIN during working hours
-    sessionStorage.setItem('clinica_auth', Date.now().toString());
+  const textoBtn = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Entrando…'; }
+  err.style.display = 'none';
+  try {
+    await signInWithEmailAndPassword(window._auth, email, pass);
+    document.getElementById('loginPass').value = '';
     initPersonalView();
     showView('personalView');
-  } else {
-    document.getElementById('pinError').style.display = 'block';
-    for (let i=0;i<6;i++) { const el=document.getElementById(`pd${i}`); if(el) el.value=''; }
-    document.getElementById('pd0').focus();
+  } catch (e) {
+    let msg = 'Correo o contraseña incorrectos.';
+    if (e.code === 'auth/invalid-email')          msg = 'Ese correo no es válido.';
+    else if (e.code === 'auth/too-many-requests') msg = 'Demasiados intentos. Esperá unos minutos.';
+    else if (e.code === 'auth/network-request-failed') msg = 'Sin conexión. Revisá tu internet.';
+    err.textContent = msg;
+    err.style.display = 'block';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = textoBtn || 'Entrar'; }
   }
 };
 
+// Salir del panel: vuelve a identidad anónima, para que la página siga
+// funcionando como página pública de citas en el mismo dispositivo.
+window.salirPersonal = async () => {
+  try { await signOut(window._auth); } catch (_) {}
+  try { await signInAnonymously(window._auth); } catch (_) {}
+  showView('patientView');
+};
+
 window.showPersonalLogin = () => {
-  // Check if session is still valid (within working hours, same day)
-  const auth = sessionStorage.getItem('clinica_auth');
-  if (auth) {
-    const authTime = parseInt(auth);
-    const now = new Date();
-    const authDate = new Date(authTime);
-    const sameDay = authDate.toDateString() === now.toDateString();
-    const dow = now.getDay();
-    const mins = now.getHours() * 60 + now.getMinutes();
-    // Working hours: lun-jue 12:30-17:30, vie 8:30-15:30, sab 7:30-14:30
-    const inHours =
-      (dow >= 1 && dow <= 4 && mins >= 12*60+30 && mins <= 17*60+30) ||
-      (dow === 5 && mins >= 8*60+30 && mins <= 15*60+30) ||
-      (dow === 6 && mins >= 7*60+30 && mins <= 14*60+30);
-    if (sameDay && inHours) {
-      // Auto-login — no PIN needed
-      initPersonalView();
-      showView('personalView');
-      return;
-    } else {
-      // Session expired — clear it
-      sessionStorage.removeItem('clinica_auth');
-    }
+  // Firebase mantiene la sesión abierta en el dispositivo: si la asistente ya
+  // entró antes, pasa directo. Antes esto lo hacía un sessionStorage con
+  // horario laboral; ahora la sesión es real y se cierra desde el panel.
+  if (window._esPersonal()) {
+    initPersonalView();
+    showView('personalView');
+    return;
   }
-  buildPinInputs();
+  const em = document.getElementById('loginEmail');
+  if (em) setTimeout(() => em.focus(), 100);
   showView('personalLoginView');
 };
 
@@ -2853,7 +2952,12 @@ function _normNombre(n){
 async function buscarCitaDelDia(tel, nombre, fecha){
   const telN = _normTel(tel);
   if (!telN) return null;
+  await window._listo;
   try {
+    // La coleccion publica ya no lleva telefono ni nombre. Cada cita guarda
+    // una huella irreversible de ambos: quien ya conoce sus datos reconoce su
+    // propia cita, y nadie mas puede deducir nada de la huella.
+    const mia = await window._huella(tel, nombre);
     const snap = await getDocs(query(window._col, where('fecha','==',fecha)));
     let match = null;
     snap.forEach(d => {
@@ -2861,11 +2965,13 @@ async function buscarCitaDelDia(tel, nombre, fecha){
       const c = d.data();
       if (c.clinica !== 'sancristobal') return;   // solo esta sede
       if (c.estado === 'cancelada') return;
-      if (_normTel(c.tel) !== telN) return;
-      if (_normNombre(c.nombre) === _normNombre(nombre)) {
+      if (c.busqueda && c.busqueda === mia) { match = { ...c, _docId: d.id }; return; }
+      // Compatibilidad con las citas creadas antes de la separacion.
+      if (c.tel && _normTel(c.tel) === telN && _normNombre(c.nombre) === _normNombre(nombre)) {
         match = { ...c, _docId: d.id };
       }
     });
+    if (match && !match.nombre) match.nombre = nombre;
     return match;
   } catch(e) { console.log('buscarCitaDelDia:', e); return null; }
 }
@@ -2972,7 +3078,7 @@ window.confirmarCita = async () => {
   };
 
   try {
-    await addDoc(window._col, cita);
+    await window._guardarCita(cita);
     invalidarSlotsSC();
   } catch(e) {
     console.log('Firebase save error', e);
@@ -3074,6 +3180,7 @@ window.resetPatient = () => {
 
 // ── PERSONAL VIEW ──────────────────────────────────────
 function initPersonalView() {
+  window._listo.then(() => {});
   S.personalDate = new Date();
   S.currentTab = 'agenda';
   updatePersonalDateDisplay();
@@ -3130,6 +3237,10 @@ async function loadProximasCitas() {
         }
       });
     }
+
+    // Los nombres viven en citas_datos: solo el personal autenticado los lee.
+    const datosProx = await window._traerDatos(proximasCitas.map(c => c._docId));
+    proximasCitas.forEach(c => Object.assign(c, datosProx[c._docId] || {}));
 
     if (proximasCitas.length === 0) {
       banner.style.display = 'none';
@@ -3272,6 +3383,12 @@ async function loadAgenda() {
       : query(window._col, where('fecha','==',dateStr), where('medicoNombre','==',S.filterMedico));
     const snap = await getDocs(q);
     snap.forEach(d => citas.push({...d.data(), _docId: d.id}));
+    // El nombre y el teléfono viven aparte, en citas_datos, y solo el personal
+    // autenticado puede leerlos. Se unen aquí, ya dentro del panel.
+    const datos = await window._traerDatos(citas.map(c => c._docId));
+    citas = citas.map(c => ({ ...(datos[c._docId] || {}), ...c,
+                              nombre: (datos[c._docId] || {}).nombre || c.nombre || '(sin nombre)',
+                              tel:    (datos[c._docId] || {}).tel    || c.tel    || '' }));
   } catch(e) {
     console.log('Firebase load error', e);
     const local = JSON.parse(localStorage.getItem('citas_local')||'[]');
@@ -3665,6 +3782,13 @@ window.loadEspera = async (filtro = 'todas') => {
     const snap = await getDocs(window._espCol);
     let items = [];
     snap.forEach(d => items.push({...d.data(), _docId: d.id}));
+    // Nombre y teléfono viven en espera_datos (solo personal autenticado).
+    await Promise.all(items.map(async it => {
+      try {
+        const s = await getDoc(doc(window._db, 'espera_datos', it._docId));
+        if (s.exists()) Object.assign(it, s.data());
+      } catch (_) {}
+    }));
     // Filter
     if (filtro !== 'todas') {
       const medicoEsps = {
@@ -3828,7 +3952,7 @@ window.guardarEspera = async () => {
   const horaTexto = horaPref ? (horasFranja.includes(horaPref) ? horaPref : formatTime(horaPref)) : 'Sin preferencia';
 
   try {
-    await addDoc(window._espCol, {
+    await window._guardarEspera({
       nombre, tel,
       especialidad: S.especialidad,
       fechaPreferida: fecha || null,
@@ -4271,11 +4395,16 @@ async function loadDurEditor() {
   try {
     const q = query(window._col, where('fecha','==',fecha), where('medicoId','==',medicoId));
     const snap = await getDocs(q);
+    const _ids = [];
     snap.forEach(doc => {
       if (doc.data().estado !== 'cancelada') {
         citasMap[doc.data().hora] = {...doc.data(), _docId: doc.id};
+        _ids.push(doc.id);
       }
     });
+    // El nombre del paciente vive en citas_datos (solo lo lee el personal).
+    const _dat = await window._traerDatos(_ids);
+    Object.values(citasMap).forEach(c => Object.assign(c, _dat[c._docId] || {}));
   } catch(e) {}
 
   // Build slots using saved overrides — slots are now the effective times
