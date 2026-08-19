@@ -2872,29 +2872,79 @@ function mostrarOpcionesDiaLleno() {
 // Lee el mensaje del día (config_app/mensaje_FECHA_sancristobal) y, si existe,
 // lo muestra ARRIBA de las opciones. Es el mensaje que aparece dentro del flujo
 // de agendar —donde el paciente sí lo lee, a diferencia del flyer.
+// ── AVISO DEL DÍA ────────────────────────────────────────────────────────
+// Cuando la clínica bloquea un día (capacitación, asueto, cambio de sede), el
+// paciente veía una línea gris: "No hay horarios disponibles para este día".
+// No explicaba nada y parecía un error. Ahora ve el aviso que la clínica
+// escribió —con su imagen, si la subió— y justo debajo el botón para saltar
+// al próximo día con espacio.
 async function mostrarMensajeDia() {
   const panel = document.getElementById('diaLlenoPanel');
-  if (!panel) return;
-  const fecha = dateToStr(S.selectedDate);
-  const mid = getMedicoId ? getMedicoId() : null; // médico elegido por el paciente
-  if (!mid) return;
+  if (!panel) return false;
+  const fecha = `${S.selectedDate.getFullYear()}-${String(S.selectedDate.getMonth()+1).padStart(2,'0')}-${String(S.selectedDate.getDate()).padStart(2,'0')}`;
+  const mid = getMedicoId ? getMedicoId() : null;
+  if (!mid) return false;
   try {
-    const snap = await getDocs(window._cfgCol);
-    let cfg = null;
-    snap.forEach(d => { if (d.id === `mensaje_${fecha}_${mid}`) cfg = d.data(); });
-    if (!cfg || !cfg.activo || !cfg.texto) return;
+    await window._listo;
+    // El aviso es por médico Y POR SEDE: cada página lee el suyo. Antes las
+    // dos leían el mismo documento, así que un aviso escrito al cerrar una
+    // sede también aparecía en la otra, donde sí había consulta.
+    let snap = await getDoc(doc(window._db, 'config_app', `mensaje_${fecha}_${mid}_sancristobal`));
+    // Compatibilidad: avisos creados antes de la separación por sede.
+    if (!snap.exists()) snap = await getDoc(doc(window._db, 'config_app', `mensaje_${fecha}_${mid}`));
+    const cfg = snap.exists() ? snap.data() : null;
+    if (!cfg || !cfg.activo || (!cfg.texto && !cfg.imagen)) return false;
+
+    const esc = (t) => (t || '').replace(/</g, '&lt;');
+    const ICONOS = { capacitacion:'📚', asueto:'🎉', sede:'🏥', cerrado:'🔒' };
+    const icono = ICONOS[cfg.tipo] || '📌';
 
     let botonHtml = '';
-    if (cfg.botonSede === 'mixco') {
+    if (cfg.botonSede && cfg.botonSede !== 'sancristobal') {
       botonHtml = `<a href="https://proyeden.github.io/Citas-Mixco/" target="_blank" rel="noopener"
-        style="display:block;margin-top:10px;padding:11px;background:#1A6B8A;color:#fff;border-radius:10px;text-align:center;font-weight:700;font-size:14px;text-decoration:none">👉 Ir a la sede de Mixco</a>`;
+        style="display:block;margin-top:12px;padding:12px;background:#1A6B8A;color:#fff;border-radius:10px;text-align:center;font-weight:700;font-size:14px;text-decoration:none">👉 Ir a la sede de Mixco</a>`;
     }
+
+    const imgHtml = cfg.imagen
+      ? `<img src="${cfg.imagen}" alt="Aviso"
+           style="width:100%;display:block;border-radius:11px;margin-bottom:${cfg.texto ? '12px' : '0'}">`
+      : '';
+
     const box = document.createElement('div');
-    box.style.cssText = 'padding:16px;border:2px solid #1A6B8A;border-radius:12px;background:#EAF6FB;margin-bottom:4px';
-    box.innerHTML = `<div style="font-size:14px;color:#0F3F52;line-height:1.5;font-weight:500">${cfg.texto.replace(/</g,'&lt;')}</div>${botonHtml}`;
+    box.id = 'avisoDia';
+    box.style.cssText = 'padding:16px;border:2px solid #1A6B8A;border-radius:14px;background:#EAF6FB;margin-bottom:6px';
+    box.innerHTML = `
+      ${imgHtml}
+      ${cfg.texto ? `<div style="display:flex;gap:10px;align-items:flex-start">
+        <span style="font-size:20px;line-height:1.2">${icono}</span>
+        <div style="flex:1;font-size:14px;color:#0F3F52;line-height:1.55;font-weight:500">${esc(cfg.texto)}</div>
+      </div>` : ''}
+      ${botonHtml}`;
     panel.insertBefore(box, panel.firstChild);
-  } catch(e) { console.log('mensaje día:', e); }
+
+    // El aviso ya explica por qué no hay horarios: la línea gris sobra, y el
+    // "⚠️ Sin citas disponibles" en rojo contradice el tono del aviso.
+    const grid = document.getElementById('slotsGrid');
+    if (grid && /No hay horarios disponibles/.test(grid.textContent)) grid.innerHTML = '';
+    const urg = document.getElementById('urgenciaMsg');
+    if (urg) urg.style.display = 'none';
+    const titulo = document.getElementById('slotsTitle');
+    if (titulo) titulo.textContent = S.selectedDate.toLocaleDateString('es-GT',
+      { weekday:'long', day:'numeric', month:'long' });
+
+    // Si el día está cerrado del todo, la lista de espera "por si se libera un
+    // espacio" promete algo que no va a pasar: se deja solo el botón que
+    // lleva al próximo día con lugar.
+    if (['capacitacion','asueto','cerrado'].includes(cfg.tipo)) {
+      const botones = panel.querySelectorAll('button');
+      botones.forEach(b => {
+        if (/lista de espera/i.test(b.textContent)) b.style.display = 'none';
+      });
+    }
+    return true;
+  } catch(e) { console.log('aviso del día:', e); return false; }
 }
+
 
 // Busca la próxima fecha con disponibilidad y navega a ella
 async function buscarCitaMasCercana() {
