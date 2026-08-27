@@ -2427,10 +2427,18 @@ async function cargarSlotsSC(mid) {
     map.forEach(v => v.sort((a,b) => a.localeCompare(b)));
   } catch(e) { console.log('Error cargando slots de la agenda:', e); }
   window._slotsSCCache = { mid, map };
+  window._revelMemoSC = null;
+  // Los ocupados hacen falta para saber cuántos huecos quedan de verdad, que
+  // es lo que decide si se abren 1 o 3 días.
+  try { await cargarOcupadosSC(mid); } catch(_){}
   return map;
 }
 
-function invalidarSlotsSC() { window._slotsSCCache = null; }
+function invalidarSlotsSC() {
+  window._slotsSCCache = null;
+  window._ocupSC = null;
+  window._revelMemoSC = null;
+}
 
 // Próxima fecha (después de 'desdeFecha') que tenga al menos un horario libre
 // según la agenda, descontando lo que ya reservaron otros pacientes.
@@ -2548,6 +2556,89 @@ async function findFirstAvailableDate() {
   return null;
 }
 
+
+// ── CUÁNTOS DÍAS SE LE MUESTRAN AL PACIENTE ────────────────────────────────
+// Misma regla que la sede de Mixco, que hasta ahora era la única que la tenía:
+//   • Si el primer día con espacio tiene MENOS DE 2 huecos libres (agenda
+//     apretada) → se abren hasta 3 días, para que el paciente pueda elegir.
+//   • Si tiene 2 o más (hay holgura) → se abre 1 solo día.
+//
+// Sin esto, todo día dentro de los 30 que publica la agenda se marcaba como
+// disponible, y el paciente veía el mes entero abierto: exactamente lo que
+// compromete la agenda en días que todavía no se sabe si tendrán demanda.
+const REVEAL_MIN_LIBRES = 2;
+const REVEAL_DIAS_ESCASO = 3;
+const REVEAL_DIAS_HOLGADO = 1;
+
+// Horas ya reservadas por otros pacientes, por fecha. Se llena una sola vez
+// junto con los slots: consultarlo por día, como hacía proximaFechaConEspacio,
+// significaba una consulta a Firestore por cada día del calendario.
+window._ocupSC = null;
+
+async function cargarOcupadosSC(mid){
+  if (window._ocupSC && window._ocupSC.mid === mid) return window._ocupSC.map;
+  const map = new Map();
+  try {
+    await window._listo;
+    const snap = await getDocs(query(window._col, where('medicoId','==',mid)));
+    snap.forEach(d => {
+      const c = d.data();
+      if (c.clinica !== 'sancristobal' || c.estado === 'cancelada') return;
+      if (!c.fecha || !c.hora) return;
+      if (!map.has(c.fecha)) map.set(c.fecha, new Set());
+      map.get(c.fecha).add(c.hora);
+    });
+  } catch(e) { console.log('ocupados SC:', e && e.code); }
+  window._ocupSC = { mid, map };
+  return map;
+}
+
+function libresDelDiaSC(fecha, mid){
+  const c = window._slotsSCCache;
+  if (!c || c.mid !== mid) return 0;
+  const slots = c.map.get(fecha) || [];
+  if (!slots.length) return 0;
+  const occ = (window._ocupSC && window._ocupSC.mid === mid)
+    ? (window._ocupSC.map.get(fecha) || new Set()) : new Set();
+  const now = new Date();
+  const esHoy = fecha === dateToStr(now);
+  const nowMins = esHoy ? (now.getHours()*60 + now.getMinutes()) : -1;
+  return slots.filter(s => {
+    if (occ.has(s)) return false;
+    if (esHoy) {
+      const [h,m] = s.split(':').map(Number);
+      if (nowMins >= h*60 + m + 15) return false;
+    }
+    return true;
+  }).length;
+}
+
+// Memoizado: isDayBookable corre por cada celda del calendario.
+window._revelMemoSC = null;
+function diasReveladosSC(mid){
+  const c = window._slotsSCCache;
+  if (!c || c.mid !== mid) return null;
+  if (window._revelMemoSC && window._revelMemoSC.mid === mid && window._revelMemoSC.cache === c)
+    return window._revelMemoSC.set;
+
+  const hoy = new Date();
+  const set = new Set();
+  const conEspacio = [];
+  for (let i = 0; i <= 30; i++){
+    const d = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate() + i);
+    if (d.getDay() === 0) continue;
+    const f = dateToStr(d);
+    if (libresDelDiaSC(f, mid) > 0) conEspacio.push(f);
+  }
+  if (conEspacio.length){
+    const libresPrimero = libresDelDiaSC(conEspacio[0], mid);
+    const cuantos = (libresPrimero < REVEAL_MIN_LIBRES) ? REVEAL_DIAS_ESCASO : REVEAL_DIAS_HOLGADO;
+    conEspacio.slice(0, cuantos).forEach(f => set.add(f));
+  }
+  window._revelMemoSC = { mid, cache: c, set };
+  return set;
+}
+
 function isDayBookable(year, month, day) {
   // Returns: 'available' | 'tomorrow_pending' | 'future' | 'unavailable'
   const d = new Date(year, month, day);
@@ -2605,9 +2696,14 @@ function isDayBookable(year, month, day) {
     // Caché lista: si hay slots publicados ese día → agendable. Si no hay,
     // dentro de 30 días es un día lleno/bloqueado (programación existe) →
     // clickeable para mostrar opciones; más allá, aún no aperturado.
+    // Solo se abren los días REVELADOS. Antes, cualquier día dentro de los 30
+    // que publica la agenda se marcaba disponible, y eso abría el mes entero.
+    const revelados = diasReveladosSC(mid);
+    if (revelados && revelados.has(targetStr)) return 'available';
+    // Un día con horarios pero ya fuera del revelado: se deja tocable para que
+    // muestre "agenda completa" con la lista de espera, no como no aperturado.
     const tieneSlots = (cache.map.get(targetStr) || []).length > 0;
-    if (tieneSlots) return 'available';
-    if (diasAdelante >= 0 && diasAdelante <= 30) return 'available';
+    if (tieneSlots && libresDelDiaSC(targetStr, mid) === 0) return 'available';
     return 'future';
   }
   // Caché del médico aún no cargó (carrera al entrar recién a la especialidad).
