@@ -2635,8 +2635,17 @@ function diasReveladosSC(mid){
     if (libresDelDiaSC(f, mid) > 0) conEspacio.push(f);
   }
   if (conEspacio.length){
+    // La escasez se medía SOLO por el primer día con espacio, e ignoraba
+    // cuántos días llenos hubo antes. Con la agenda apretada —los próximos
+    // días ya tomados y el primero libre recién dentro de una semana— el
+    // paciente veía un único día, que es justo cuando más falta hace poder
+    // elegir. Ahora también cuenta esa distancia.
     const libresPrimero = libresDelDiaSC(conEspacio[0], mid);
-    const cuantos = (libresPrimero < REVEAL_MIN_LIBRES) ? REVEAL_DIAS_ESCASO : REVEAL_DIAS_HOLGADO;
+    const hoyStr = dateToStr(new Date());
+    const diasHasta = Math.round(
+      (new Date(conEspacio[0] + 'T12:00:00') - new Date(hoyStr + 'T12:00:00')) / 86400000);
+    const apretado = libresPrimero < REVEAL_MIN_LIBRES || diasHasta > 2;
+    const cuantos = apretado ? REVEAL_DIAS_ESCASO : REVEAL_DIAS_HOLGADO;
     conEspacio.slice(0, cuantos).forEach(f => set.add(f));
   }
   window._revelMemoSC = { mid, cache: c, set };
@@ -3349,10 +3358,8 @@ window.confirmarCita = async () => {
   try { playNotifSound('cita'); } catch(e) {}
   // Notificación automática via Make.com webhook
   try {
-    await fetch('https://hook.us2.make.com/ikbjgcxbi0ixaef3pyh2e1mx47rfkpcc', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    const WEBHOOK = 'https://hook.us2.make.com/ikbjgcxbi0ixaef3pyh2e1mx47rfkpcc';
+    const cuerpoWebhook = JSON.stringify({
         id,
         tipo_evento: 'cita_agendada',
         clinica: 'San Cristóbal',
@@ -3367,11 +3374,36 @@ window.confirmarCita = async () => {
         tipo: cita.tipo,
         medico: medico.nombre,
         notificar: getNotificarCitas(getMedicoId(), 'sancristobal')
-      })
+      });
+    const resp = await fetch(WEBHOOK, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: cuerpoWebhook
     });
-    console.log('✅ Webhook enviado a Make.com');
+    // Antes se daba por enviado sin mirar la respuesta: si Make devolvía un
+    // error, la cita quedaba agendada y nadie se enteraba de que la
+    // notificación no salió. Ahora se comprueba y se reintenta una vez.
+    if (!resp || !resp.ok) throw new Error('HTTP ' + (resp ? resp.status : '?'));
+    console.log('✅ Notificación enviada');
   } catch(e) {
-    console.log('⚠️ Error enviando webhook:', e);
+    console.log('⚠️ Falló la notificación:', e && e.message);
+    try {
+      await new Promise(r => setTimeout(r, 1500));
+      const r2 = await fetch(WEBHOOK, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: cuerpoWebhook });
+      if (!r2 || !r2.ok) throw new Error('HTTP ' + (r2 ? r2.status : '?'));
+      console.log('✅ Notificación enviada en el segundo intento');
+    } catch(e2) {
+      console.log('❌ La notificación NO salió:', e2 && e2.message);
+      // Queda anotado para que el equipo lo vea en el panel interno en vez de
+      // enterarse cuando el paciente llega sin que nadie lo esperara.
+      try {
+        await setDoc(doc(window._db, 'notif_fallidas', id), {
+          id, clinica: 'San Cristóbal', paciente: nombre, fecha: fechaStr, hora: horaStr,
+          motivo: String(e2 && e2.message), creadoEn: new Date().toISOString()
+        });
+      } catch(_) {}
+    }
   }
 
   // Show confirmation
