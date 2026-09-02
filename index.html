@@ -2466,6 +2466,10 @@ async function proximaFechaConEspacio(mid, desdeFecha) {
         if (c.fecha !== f) return;
         if (c.clinica !== 'sancristobal') return;
         if (c.estado === 'cancelada') return;
+      // Una cita sin hora quedó a medio hacer: el paciente eligió un horario,
+      // lo perdió al cambiar de día y el sistema la guardó igual. No es una
+      // cita real y no debe bloquear una nueva ni confundir a nadie.
+      if (!c.hora) return;
         ocupados.add(c.hora);
       });
     } catch(e) {}
@@ -3166,6 +3170,9 @@ function dateToStr(d) {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 function formatTime(t) {
+  // Tolerante a vacío: antes lanzaba y cortaba el guardado a la mitad,
+  // dejando la cita creada pero sin notificar a nadie.
+  if (!t || typeof t !== 'string' || !t.includes(':')) return '—';
   const [h,m] = t.split(':').map(Number);
   const ampm = h>=12?'pm':'am';
   const h12 = h>12?h-12:h===0?12:h;
@@ -3200,6 +3207,8 @@ async function buscarCitaDelDia(tel, nombre, fecha){
       const c = d.data();
       if (c.clinica !== 'sancristobal') return;   // solo esta sede
       if (c.estado === 'cancelada') return;
+      // Una reserva sin hora quedó a medio hacer: no es una cita real.
+      if (!c.hora) return;
       if (c.busqueda && c.busqueda === mia) { match = { ...c, _docId: d.id }; return; }
       // Compatibilidad con las citas creadas antes de la separacion.
       if (c.tel && _normTel(c.tel) === telN && _normNombre(c.nombre) === _normNombre(nombre)) {
@@ -3221,17 +3230,23 @@ function preguntarDuplicado(citaExistente){
     ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10000;display:flex;align-items:center;justify-content:center;padding:18px';
     ov.innerHTML = `
       <div style="max-width:400px;width:100%;background:#fff;border-radius:16px;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,.3)">
-        <div style="font-size:34px;text-align:center;margin-bottom:6px">⚠️</div>
-        <h3 style="margin:0 0 6px;font-size:18px;text-align:center;color:var(--navy,#1A3A5C)">Ya tiene una cita ese día</h3>
+        <div style="font-size:34px;text-align:center;margin-bottom:6px">📅</div>
+        <h3 style="margin:0 0 6px;font-size:18px;text-align:center;color:var(--navy,#1A3A5C)">Con este teléfono ya hay una cita ese día</h3>
         <p style="font-size:14px;color:#555;text-align:center;margin:0 0 4px">A nombre de <strong>${(citaExistente.nombre||'').replace(/</g,'&lt;')}</strong></p>
         <div style="background:#F1F5F9;border-radius:10px;padding:12px;text-align:center;margin:12px 0">
           <div style="font-size:13px;color:#64748B">${(citaExistente.especialidad||'')}</div>
-          <div style="font-size:22px;font-weight:800;color:var(--navy,#1A3A5C);margin-top:2px">${citaExistente.hora}</div>
+          <div style="font-size:22px;font-weight:800;color:var(--navy,#1A3A5C);margin-top:2px">${formatTime(citaExistente.hora)}</div>
+          <div style="font-size:12px;color:#64748B;margin-top:4px">${
+            (()=>{ const [Y,M,D]=(citaExistente.fecha||'').split('-').map(Number);
+              return Y ? new Date(Y,M-1,D).toLocaleDateString('es-GT',{weekday:'long',day:'numeric',month:'long'}) : ''; })()
+          }${citaExistente.medicoNombre ? ' · '+citaExistente.medicoNombre : ''}</div>
         </div>
-        <p style="font-size:13px;color:#555;text-align:center;margin:0 0 14px">¿Qué desea hacer?</p>
+        <p style="font-size:13px;color:#555;text-align:center;margin:0 0 14px">
+          No es un problema: solo queremos evitar apartar dos turnos el mismo día.<br>
+          <b>Si esta cita no es suya o quiere seguir con la nueva, elija la segunda opción.</b></p>
         <button id="dupCambiar" style="width:100%;padding:13px;margin-bottom:9px;border:none;border-radius:11px;background:var(--navy,#1A3A5C);color:#fff;font-family:inherit;font-weight:700;font-size:14px;cursor:pointer">🔄 Cambiar mi cita a este nuevo horario</button>
-        <button id="dupOtra" style="width:100%;padding:13px;margin-bottom:9px;border:1.5px solid #CBD5E1;border-radius:11px;background:#fff;color:#334155;font-family:inherit;font-weight:700;font-size:14px;cursor:pointer">👥 Es para otra persona</button>
-        <button id="dupCancelar" style="width:100%;padding:13px;border:none;border-radius:11px;background:#F1F5F9;color:#64748B;font-family:inherit;font-weight:600;font-size:14px;cursor:pointer">Dejar mi cita como está</button>
+        <button id="dupOtra" style="width:100%;padding:13px;margin-bottom:9px;border:1.5px solid #CBD5E1;border-radius:11px;background:#fff;color:#334155;font-family:inherit;font-weight:700;font-size:14px;cursor:pointer">👥 Es para otra persona · continuar</button>
+        <button id="dupCancelar" style="width:100%;padding:13px;border:none;border-radius:11px;background:#F1F5F9;color:#64748B;font-family:inherit;font-weight:600;font-size:14px;cursor:pointer">Dejar la que ya tengo y salir</button>
       </div>`;
     document.body.appendChild(ov);
     const cerrar = (val) => { ov.remove(); resolve(val); };
@@ -3242,7 +3257,27 @@ function preguntarDuplicado(citaExistente){
   });
 }
 
+// Candado contra el doble toque. Guardar una cita tarda un segundo o dos —hay
+// que escribir en dos colecciones y avisar al equipo— y en ese rato el botón
+// seguía activo. Un segundo toque lanzaba TODO otra vez: el primero creaba la
+// cita y el segundo la encontraba, y el paciente recibía «ya tiene una cita»
+// en su primer intento. En un teléfono, tocar dos veces es facilísimo.
+let _confirmando = false;
+
 window.confirmarCita = async () => {
+  if (_confirmando) return;
+  _confirmando = true;
+  const _btnConf = document.getElementById('btnConfirmarCita');
+  if (_btnConf) { _btnConf.disabled = true; _btnConf.dataset.txt = _btnConf.textContent; _btnConf.textContent = 'Agendando…'; }
+  try {
+    return await _confirmarCitaReal();
+  } finally {
+    _confirmando = false;
+    if (_btnConf) { _btnConf.disabled = false; if (_btnConf.dataset.txt) _btnConf.textContent = _btnConf.dataset.txt; }
+  }
+};
+
+const _confirmarCitaReal = async () => {
   const nombre = document.getElementById('fNombre').value.trim();
   const nacDia = document.getElementById('fNacDia').value;
   const nacMes = document.getElementById('fNacMes').value;
@@ -3294,6 +3329,17 @@ window.confirmarCita = async () => {
       }
     }
     // accion === 'otra' → continуar y crear la cita nueva.
+  }
+
+  // Sin horario NO se agenda. Se podía llegar acá con el horario en blanco:
+  // se elegía uno, se volvía atrás a cambiar de día —lo que lo borra— y el
+  // botón de confirmar seguía habilitado. La cita se guardaba sin hora, la
+  // agenda le ponía las 08:00 por defecto y el aviso al equipo nunca salía,
+  // porque dar formato a una hora vacía rompía la función justo antes.
+  if (!S.selectedSlot) {
+    alert('Elegí un horario antes de confirmar.\n\nSi cambiaste de día, tocá de nuevo la hora que querés.');
+    try { goStep(2); } catch(_) {}
+    return;
   }
 
   const id = 'C' + Date.now().toString().slice(-6);
