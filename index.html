@@ -1996,6 +1996,48 @@ window._avisoVerificando = (encender) => {
   document.body.appendChild(capa);
 };
 
+// ── DIAGNÓSTICO: ¿POR QUÉ NO SE OFRECE ESTE HORARIO? ─────────────────────
+//
+// Desde la consola del navegador:   _porQueNo('2026-10-26')
+//
+// Imprime, horario por horario, lo único que hace falta saber: si la agenda lo
+// publicó, si alguna cita lo tiene tomado (y con qué estado y sede), si ya
+// pasó de hora, y si se le está ofreciendo al paciente. Sirve para distinguir
+// de un golpe «la app lo está escondiendo» de «la agenda nunca lo publicó»,
+// que son dos problemas con arreglos en lados opuestos.
+window._porQueNo = async (fecha) => {
+  const mid = (typeof getMedicoId === 'function' && getMedicoId()) || 'denis';
+  const raw = await traerFuturoSC();
+  const esDeAca = (x) => x.clinica === 'sancristobal';
+  const pub = (raw.slots || []).filter(x => x.fecha === fecha && x.medicoId === mid);
+  const cit = (raw.citas || []).filter(c => c.fecha === fecha && c.medicoId === mid);
+  const horas = [...new Set(pub.filter(x => x.disponible !== false && esDeAca(x)).map(x => x.hora))].sort();
+
+  console.log(`── ${mid} · ${fecha} ──`);
+  console.log('Publicados por la agenda:', horas.length ? horas.join(', ') : 'NINGUNO');
+
+  const fuera = pub.filter(x => x.disponible === false || !esDeAca(x));
+  if (fuera.length) console.log('Publicados pero descartados acá:',
+    fuera.map(x => `${x.hora} (sede ${x.clinica || 'sin sede'}${x.disponible === false ? ', disponible:false' : ''})`).join(', '));
+
+  const esHoy = fecha === dateToStr(new Date());
+  const ahora = new Date().getHours() * 60 + new Date().getMinutes();
+  console.table(horas.map(h => {
+    const t = cit.find(c => c.hora === h && c.estado !== 'cancelada' && esDeAca(c));
+    return {
+      hora: h,
+      tomado: t ? `SÍ · estado ${t.estado || '(vacío)'} · sede ${t.clinica || '(sin sede)'} · ${t.especialidad || ''}` : 'no',
+      pasado: esHoy && ahora >= timeToMins(h) + 15 ? 'SÍ' : 'no'
+    };
+  }));
+
+  const sueltas = cit.filter(c => !horas.includes(c.hora));
+  if (sueltas.length) console.log('⚠ Citas en horas que la agenda NO publica:',
+    sueltas.map(c => `${c.hora} (estado ${c.estado || '(vacío)'}, sede ${c.clinica || '(sin sede)'})`).join(', '));
+
+  return { publicados: horas, citas: cit };
+};
+
 window._horarioSigueLibre = async (medicoId, fecha, hora) => {
   await window._listo;
   try {
